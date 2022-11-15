@@ -3,11 +3,34 @@
 extern crate test;
 
 use aes::{Aes128, Aes256};
-use byteorder::{ByteOrder, LittleEndian};
 use cipher::{generic_array::GenericArray, KeyInit, KeySizeUser};
 use core::hint;
 use hctr2::{Cipher, BLOCK_SIZE};
 use test::Bencher;
+
+#[inline(always)]
+fn put_le_bytes(b: &mut [u8], v: u64) {
+    b[7] = (v >> 56) as u8;
+    b[6] = (v >> 48) as u8;
+    b[5] = (v >> 40) as u8;
+    b[4] = (v >> 32) as u8;
+    b[3] = (v >> 24) as u8;
+    b[2] = (v >> 16) as u8;
+    b[1] = (v >> 8) as u8;
+    b[0] = v as u8;
+}
+
+#[inline(always)]
+fn get_le_bytes(b: &[u8]) -> u64 {
+    return (b[7] as u64) << 56
+        | (b[6] as u64) << 48
+        | (b[5] as u64) << 40
+        | (b[4] as u64) << 32
+        | (b[3] as u64) << 24
+        | (b[2] as u64) << 16
+        | (b[1] as u64) << 8
+        | (b[0] as u64);
+}
 
 macro_rules! bench {
     ($name:ident, $C:ident, $buflen:expr) => {
@@ -19,8 +42,8 @@ macro_rules! bench {
             let mut buf = vec![0u8; $buflen];
             b.bytes = $buflen;
             b.iter(|| {
-                let i = LittleEndian::read_u64(&tweak);
-                LittleEndian::write_u64(&mut tweak, i + 1);
+                let i = get_le_bytes(&tweak);
+                put_le_bytes(&mut tweak, i + 1);
                 c.encrypt_in_place(&mut buf, &tweak);
             });
             hint::black_box(&mut buf);

@@ -21,7 +21,6 @@
 // Because I want to use "let S = ..." to match the paper.
 #![allow(non_snake_case)]
 
-use byteorder::{ByteOrder, LittleEndian};
 use cipher::{
     consts::U16, BlockCipher, BlockDecrypt, BlockEncrypt, Key, KeyInit,
     KeySizeUser,
@@ -98,7 +97,7 @@ where
 
         // L ← Ek(bin(1))
         let mut L = cipher::Block::<C>::default();
-        LittleEndian::write_u64(&mut L, 1);
+        put_le_bytes(&mut L, 1);
         block.encrypt_block(&mut L);
 
         Cipher {
@@ -197,8 +196,8 @@ where
 
         for (dst, src) in zip(dstHead, srcHead) {
             // TODO(eric): this assumes len(ctr) == 16.
-            LittleEndian::write_u64(&mut ctr[..8], i);
-            LittleEndian::write_u64(&mut ctr[8..], 0);
+            put_le_bytes(&mut ctr[..8], i);
+            put_le_bytes(&mut ctr[8..], 0);
 
             xor_block_in_place(&mut ctr, nonce);
             self.block.encrypt_block((&mut ctr).into());
@@ -207,8 +206,8 @@ where
         }
 
         if !dstTail.is_empty() {
-            LittleEndian::write_u64(&mut ctr[..8], i);
-            LittleEndian::write_u64(&mut ctr[8..], 0);
+            put_le_bytes(&mut ctr[..8], i);
+            put_le_bytes(&mut ctr[8..], 0);
 
             xor_block_in_place(&mut ctr, nonce);
             self.block.encrypt_block((&mut ctr).into());
@@ -277,8 +276,8 @@ where
         let (head, tail) = data.as_chunks_mut::<BLOCK_SIZE>();
         for chunk in head {
             // TODO(eric): this assumes len(ctr) == 16.
-            LittleEndian::write_u64(&mut ctr[..8], i);
-            LittleEndian::write_u64(&mut ctr[8..], 0);
+            put_le_bytes(&mut ctr[..8], i);
+            put_le_bytes(&mut ctr[8..], 0);
 
             xor_block_in_place(&mut ctr, nonce);
             self.block.encrypt_block((&mut ctr).into());
@@ -287,8 +286,8 @@ where
         }
 
         if !tail.is_empty() {
-            LittleEndian::write_u64(&mut ctr[..8], i);
-            LittleEndian::write_u64(&mut ctr[8..], 0);
+            put_le_bytes(&mut ctr[..8], i);
+            put_le_bytes(&mut ctr[8..], 0);
 
             xor_block_in_place(&mut ctr, nonce);
             self.block.encrypt_block((&mut ctr).into());
@@ -316,11 +315,11 @@ where
 
         let poly = Polyval::new(&self.h);
 
-        LittleEndian::write_u64(&mut block, l);
+        put_le_bytes(&mut block, l);
         self.state1.clone_from(&poly);
         self.state0.update(&[block]);
 
-        LittleEndian::write_u64(&mut block, l + 1);
+        put_le_bytes(&mut block, l + 1);
         self.state1.clone_from(&poly);
         self.state1.update(&[block]);
 
@@ -392,4 +391,16 @@ fn xor3<const N: usize>(v: &[u8; N], x: &[u8; N], y: &[u8; N]) -> [u8; N] {
         z[i] = v[i] ^ x[i] ^ y[i];
     }
     z
+}
+
+#[inline(always)]
+fn put_le_bytes(b: &mut [u8], v: u64) {
+    b[7] = (v >> 56) as u8;
+    b[6] = (v >> 48) as u8;
+    b[5] = (v >> 40) as u8;
+    b[4] = (v >> 32) as u8;
+    b[3] = (v >> 24) as u8;
+    b[2] = (v >> 16) as u8;
+    b[1] = (v >> 8) as u8;
+    b[0] = v as u8;
 }
