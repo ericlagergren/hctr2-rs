@@ -16,7 +16,6 @@ jobs:
       matrix:
         rust:
           - nightly
-          - stable
         target:
           - armv7a-none-eabi
           - thumbv7em-none-eabi
@@ -40,15 +39,10 @@ jobs:
           - target: i686-unknown-linux-gnu
             rust: nightly
             deps: sudo apt update && sudo apt install gcc-multilib
-          - target: i686-unknown-linux-gnu
-            rust: stable
-            deps: sudo apt update && sudo apt install gcc-multilib
 
           # 64-bit Linux
           - target: x86_64-unknown-linux-gnu
             rust: nightly
-          - target: x86_64-unknown-linux-gnu
-            rust: stable
     steps:
       - uses: actions/checkout@v3
       - uses: actions-rs/toolchain@v1
