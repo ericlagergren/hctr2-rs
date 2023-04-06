@@ -3,7 +3,7 @@ name: hctr2
 on:
   pull_request:
   push:
-    branches: master
+    branches: main
 
 env:
   CARGO_INCREMENTAL: 0
@@ -16,8 +16,8 @@ jobs:
       matrix:
         rust:
           - nightly
-          - stable
         target:
+          - x86_64-unknown-linux-gnu
           - armv7a-none-eabi
           - thumbv7em-none-eabi
           - wasm32-unknown-unknown
@@ -40,15 +40,10 @@ jobs:
           - target: i686-unknown-linux-gnu
             rust: nightly
             deps: sudo apt update && sudo apt install gcc-multilib
-          - target: i686-unknown-linux-gnu
-            rust: stable
-            deps: sudo apt update && sudo apt install gcc-multilib
 
           # 64-bit Linux
           - target: x86_64-unknown-linux-gnu
             rust: nightly
-          - target: x86_64-unknown-linux-gnu
-            rust: stable
     steps:
       - uses: actions/checkout@v3
       - uses: actions-rs/toolchain@v1

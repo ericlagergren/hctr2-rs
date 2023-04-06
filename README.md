@@ -39,6 +39,9 @@ C [implementation](https://github.com/google/hctr2).
 | RK3399  | ARMv8 | 1.8 GHz   | 1.8             | simd |
 | Skylake | x86   | 3.9 GHz   | 1.2             | simd |
 
+See also
+[github.com/ericlagergren/hctr2](https://github.com/ericlagergren/hctr2).
+
 ## Security
 
 ### Disclosure
