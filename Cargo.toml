@@ -6,7 +6,7 @@ An implementation of the length-preserving encryption HCTR2 algorithm.
 """
 authors = ["Eric Lagergren"]
 edition = "2021"
-license = "BSD 3-Clause"
+license = "BSD-3-Clause"
 readme = "README.md"
 repository = "https://github.com/ericlagergren/hctr2-rs"
 keywords = [ "hctr2" ]
