@@ -14,9 +14,10 @@
 #![no_std]
 #![deny(unsafe_code)]
 #![feature(array_chunks)]
-#![feature(split_array)]
-#![feature(slice_as_chunks)]
+#![feature(doc_cfg)]
 #![feature(let_chains)]
+#![feature(slice_as_chunks)]
+#![feature(split_array)]
 #![warn(missing_docs, rust_2018_idioms)]
 // Because I want to use "let S = ..." to match the paper.
 #![allow(non_snake_case)]
