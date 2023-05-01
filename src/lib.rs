@@ -13,8 +13,8 @@
 
 #![no_std]
 #![deny(unsafe_code)]
+#![cfg_attr(docsrs, feature(doc_cfg))]
 #![feature(array_chunks)]
-#![feature(doc_cfg)]
 #![feature(let_chains)]
 #![feature(slice_as_chunks)]
 #![feature(split_array)]

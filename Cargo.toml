@@ -8,6 +8,7 @@ authors = ["Eric Lagergren"]
 edition = "2021"
 license = "BSD-3-Clause"
 readme = "README.md"
+documentation = "https://docs.rs/hctr2-rs"
 repository = "https://github.com/ericlagergren/hctr2-rs"
 keywords = [ "hctr2" ]
 categories = [ "cryptography", "no-std" ]

@@ -8,7 +8,7 @@ Length-preserving encryption algorithm https://eprint.iacr.org/2021/1441.pdf
 
 ```bash
 [dependencies]
-hctr2 = "0.1"
+hctr2 = "0.2"
 ```
 
 ## Performance
