@@ -1,39 +1,86 @@
-#![feature(test)]
+use core::{hint::black_box, time::Duration};
 
-extern crate test;
+use criterion::{criterion_group, criterion_main, BenchmarkId, Criterion, Throughput};
+use hctr2::{
+    aes::{Aes128, Aes256},
+    BlockCipher, Hctr2,
+};
+use pprof::criterion::{Output, PProfProfiler};
 
-use aes::{Aes128, Aes256};
-use byteorder::{ByteOrder, LittleEndian};
-use cipher::{generic_array::GenericArray, KeyInit, KeySizeUser};
-use core::hint;
-use hctr2::{Cipher, BLOCK_SIZE};
-use test::Bencher;
+fn bench_seal<C, F>(c: &mut Criterion, name: &'static str, f: &F)
+where
+    C: BlockCipher,
+    F: Fn() -> C,
+{
+    let mut g = c.benchmark_group(name);
+    for size in [512, 4096, 8182].iter() {
+        let mut i = 0;
+        let mut dst = vec![0u8; *size];
+        let src = vec![0u8; *size];
+        let block = f();
+        let mut cipher = Hctr2::new(block);
 
-macro_rules! bench {
-    ($name:ident, $C:ident, $buflen:expr) => {
-        #[bench]
-        fn $name(b: &mut Bencher) {
-            let mut tweak = [0u8; BLOCK_SIZE];
-            let key = vec![0u8; $C::key_size()];
-            let mut c = Cipher::<$C>::new(GenericArray::from_slice(&key[..]));
-            let mut buf = vec![0u8; $buflen];
-            b.bytes = $buflen;
+        g.throughput(Throughput::Bytes(*size as u64));
+        let name = BenchmarkId::new("seal", *size);
+        g.bench_function(name, move |b| {
             b.iter(|| {
-                let i = LittleEndian::read_u64(&tweak);
-                LittleEndian::write_u64(&mut tweak, i + 1);
-                c.encrypt_in_place(&mut buf, &tweak);
-            });
-            hint::black_box(&mut buf);
-        }
-    };
+                let tweak = (i as u128).to_le_bytes();
+                cipher
+                    .seal(black_box(&mut dst), black_box(&src), black_box(&tweak))
+                    .unwrap();
+                i += 1;
+            })
+        });
+    }
+    g.finish();
 }
-bench!(bench_hctr2_aes256_512, Aes256, 512);
-bench!(bench_hctr2_aes256_4096, Aes256, 4096);
-bench!(bench_hctr2_aes256_8192, Aes256, 8192);
 
-// AES-192 isn't benchmarked because nobody cares about its
-// performance because nobody uses it and it shouldn't exist.
+fn bench_seal_in_place<C, F>(c: &mut Criterion, name: &'static str, f: &F)
+where
+    C: BlockCipher,
+    F: Fn() -> C,
+{
+    let mut g = c.benchmark_group(name);
+    for size in [512, 4096, 8182].iter() {
+        let mut i = 0;
+        let mut buf = vec![0u8; *size];
+        let block = f();
+        let mut cipher = Hctr2::new(block);
 
-bench!(bench_hctr2_aes128_512, Aes128, 512);
-bench!(bench_hctr2_aes128_4096, Aes128, 4096);
-bench!(bench_hctr2_aes128_8192, Aes128, 8192);
+        g.throughput(Throughput::Bytes(*size as u64));
+        let name = BenchmarkId::new("seal_in_place", *size);
+        g.bench_function(name, move |b| {
+            b.iter(|| {
+                let tweak = (i as u128).to_le_bytes();
+                cipher
+                    .seal_in_place(black_box(&mut buf), black_box(&tweak))
+                    .unwrap();
+                i += 1;
+            })
+        });
+    }
+    g.finish();
+}
+
+fn bench_alg<C, F>(c: &mut Criterion, name: &'static str, f: F)
+where
+    C: BlockCipher,
+    F: Fn() -> C,
+{
+    bench_seal(c, name, &f);
+    bench_seal_in_place(c, name, &f);
+}
+
+fn bench_throughput(c: &mut Criterion) {
+    bench_alg(c, "AES-128", || Aes128::new(&[0; 16]));
+    bench_alg(c, "AES-256", || Aes256::new(&[0; 32]));
+}
+
+criterion_group! {
+    name = benches;
+    config = Criterion::default()
+        .warm_up_time(Duration::from_secs(1))
+        .with_profiler(PProfProfiler::new(100, Output::Protobuf));
+    targets = bench_throughput,
+}
+criterion_main!(benches);

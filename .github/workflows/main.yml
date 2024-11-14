@@ -1,0 +1,42 @@
+name: Test
+
+on:
+  push:
+    branches: ["main"]
+  pull_request:
+    types: [opened, synchronize, reopened]
+
+env:
+  CARGO_INCREMENTAL: 0
+  RUSTFLAGS: "-Dwarnings"
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        include:
+          # 32-bit Linux
+          - target: i686-unknown-linux-gnu
+            deps: sudo apt update && sudo apt install gcc-multilib
+
+          # 64-bit Linux
+          - target: x86_64-unknown-linux-gnu
+    steps:
+      - uses: actions/checkout@v3
+      - uses: actions-rs/toolchain@v1
+        with:
+          toolchain: stable
+          target: ${{ matrix.target }}
+          override: true
+          profile: minimal
+      - name: Check formatting
+        run: cargo fmt --all -- --check
+      - name: Clippy
+        run: cargo clippy --tests
+      - name: Unit tests
+        run: |
+          ${{ matrix.deps }}
+          cargo install --force cargo-all-features
+          cargo test-all-features
+
