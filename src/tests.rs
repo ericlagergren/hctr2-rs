@@ -4,8 +4,9 @@ use serde::Deserialize;
 
 use crate::{
     aes::{Aes128, Aes192, Aes256},
-    block::BlockCipher,
-    Hctr2,
+    block::Block,
+    xctr::Xctr,
+    Hctr2Aes128, Hctr2Aes192, Hctr2Aes256,
 };
 
 #[derive(Deserialize)]
@@ -68,12 +69,12 @@ macro_rules! xctr2_test {
             for (i, v) in vecs.iter().enumerate() {
                 let cipher =
                     <$cipher>::new(v.input.key_hex[..].try_into().expect("should not fail"));
-                let nonce = v.input.nonce_hex.as_slice().try_into().unwrap();
+                let nonce = Block::<$cipher>::from_slice(&v.input.nonce_hex);
                 let plaintext = &v.plaintext_hex;
                 let ciphertext = &v.ciphertext_hex;
 
                 let mut got = vec![0u8; plaintext.len()];
-                cipher.xctr(&mut got, plaintext, &nonce);
+                Xctr::new(&cipher).encrypt(&mut got, plaintext, &nonce);
                 assert_eq!(&got, ciphertext, "#{i}: `xctr`");
             }
         }
@@ -84,7 +85,7 @@ xctr2_test!(test_xctr2_aes192, Aes192, "XCTR_AES192.json");
 xctr2_test!(test_xctr2_aes256, Aes256, "XCTR_AES256.json");
 
 macro_rules! hctr2_test {
-    ($name:ident, $C:ident, $path:expr) => {
+    ($name:ident, $hctr:ty, $path:expr) => {
         #[test]
         fn $name() {
             const DATA: &str =
@@ -92,9 +93,7 @@ macro_rules! hctr2_test {
 
             let vecs: Vec<TestVector> = serde_json::from_str(DATA).expect("should be valid JSON,");
             for (i, v) in vecs.iter().enumerate() {
-                let mut c = Hctr2::<$C>::new($C::new(
-                    v.input.key_hex[..].try_into().expect("should not fail"),
-                ));
+                let mut c = <$hctr>::new(v.input.key_hex[..].try_into().expect("should not fail"));
                 let tweak = &v.input.tweak_hex;
                 let plaintext = &v.plaintext_hex;
                 let ciphertext = &v.ciphertext_hex;
@@ -118,6 +117,6 @@ macro_rules! hctr2_test {
         }
     };
 }
-hctr2_test!(test_hctr2_aes128, Aes128, "HCTR2_AES128.json");
-hctr2_test!(test_hctr2_aes192, Aes192, "HCTR2_AES192.json");
-hctr2_test!(test_hctr2_aes256, Aes256, "HCTR2_AES256.json");
+hctr2_test!(test_hctr2_aes128, Hctr2Aes128, "HCTR2_AES128.json");
+hctr2_test!(test_hctr2_aes192, Hctr2Aes192, "HCTR2_AES192.json");
+hctr2_test!(test_hctr2_aes256, Hctr2Aes256, "HCTR2_AES256.json");

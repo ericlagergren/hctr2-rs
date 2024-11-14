@@ -16,7 +16,15 @@ use core::{
     array, slice,
 };
 
-use super::BLOCK_SIZE;
+use typenum::{U16, U8};
+
+use crate::block::{Block, BlockBackend, BlockSize, Blocks, ByRef, Stride};
+
+const BLOCK_SIZE: usize = 16;
+
+const fn check_sizes<const K: usize, const N: usize>() {
+    const { assert!((K == 16 && N == 11) || (K == 24 && N == 13) || (K == 32 && N == 15)) }
+}
 
 // NB: `aes` implies `neon`.
 cpufeatures::new!(have_aes, "aes");
@@ -33,10 +41,8 @@ pub(super) type Aes256 = Aes<32, 15>;
 /// - `N`: number of round keys.
 #[derive(Clone)]
 pub(super) struct Aes<const K: usize, const N: usize> {
-    // Encryption round keys.
-    enc: [uint8x16_t; N],
-    // Decryption round keys.
-    dec: [uint8x16_t; N],
+    enc: AesEnc<K, N>,
+    dec: AesDec<K, N>,
 }
 
 impl<const K: usize, const N: usize> Aes<K, N> {
@@ -47,15 +53,49 @@ impl<const K: usize, const N: usize> Aes<K, N> {
     #[inline]
     #[target_feature(enable = "neon,aes")]
     pub unsafe fn new(key: &[u8; K]) -> Self {
+        const { check_sizes::<K, N>() }
+
+        let enc = AesEnc::<K, N>::new(key);
+        let dec = AesDec::<K, N>::from_enc(&enc);
+        Self { enc, dec }
+    }
+
+    pub fn get_enc_backend(&self) -> ByRef<'_, AesEnc<K, N>> {
+        const { check_sizes::<K, N>() }
+
+        ByRef(&self.enc)
+    }
+
+    pub fn get_dec_backend(&self) -> ByRef<'_, AesDec<K, N>> {
+        const { check_sizes::<K, N>() }
+
+        ByRef(&self.dec)
+    }
+}
+
+/// - `K`: key size in bytes.
+/// - `N`: number of round keys.
+#[derive(Clone)]
+#[repr(transparent)]
+pub(super) struct AesEnc<const K: usize, const N: usize> {
+    keys: [uint8x16_t; N],
+}
+
+impl<const K: usize, const N: usize> AesEnc<K, N> {
+    /// # Safety
+    ///
+    /// The NEON and AES architectural features must be
+    /// enabled.
+    #[inline]
+    #[target_feature(enable = "neon,aes")]
+    unsafe fn new(key: &[u8; K]) -> Self {
+        const { check_sizes::<K, N>() }
         debug_assert!(supported());
 
         // SAFETY: `expand_key` requires the `aes` and
         // `neon` target features, which we have.
-        let enc = unsafe { expand_key(key) };
-        // SAFETY: `invert_enc_keys` requires the `aes`
-        // and `neon` target features, which we have.
-        let dec = unsafe { invert_enc_keys(&enc) };
-        Self { enc, dec }
+        let keys = unsafe { expand_key(key) };
+        Self { keys }
     }
 
     /// # Safety
@@ -64,11 +104,12 @@ impl<const K: usize, const N: usize> Aes<K, N> {
     /// enabled.
     #[inline]
     #[target_feature(enable = "neon,aes")]
-    pub unsafe fn encrypt_block(&self, dst: &mut [u8; BLOCK_SIZE], src: &[u8; BLOCK_SIZE]) {
+    unsafe fn encrypt_block(&self, dst: &mut Block<Self>, src: &Block<Self>) {
+        const { check_sizes::<K, N>() }
         debug_assert!(supported());
 
         let mut block = vld1q_u8(src.as_ptr());
-        let (head, tail) = self.enc.split_at(self.enc.len() - 2);
+        let (head, tail) = self.keys.split_at(self.keys.len() - 2);
         for &rk in head {
             block = vaeseq_u8(block, rk);
             block = vaesmcq_u8(block);
@@ -84,7 +125,8 @@ impl<const K: usize, const N: usize> Aes<K, N> {
     /// enabled.
     #[inline]
     #[target_feature(enable = "neon,aes")]
-    pub unsafe fn encrypt_blocks(&self, dst: &mut [[u8; BLOCK_SIZE]], src: &[[u8; BLOCK_SIZE]]) {
+    unsafe fn encrypt_blocks(&self, dst: &mut [Block<Self>], src: &[Block<Self>]) {
+        const { check_sizes::<K, N>() }
         debug_assert!(supported());
 
         const STRIDE: usize = 8;
@@ -97,7 +139,7 @@ impl<const K: usize, const N: usize> Aes<K, N> {
 
             let mut blocks = [p0, p1, p2, p3, p4, p5, p6, p7];
 
-            let (head, tail) = self.enc.split_at(self.enc.len() - 2);
+            let (head, tail) = self.keys.split_at(self.keys.len() - 2);
             for &rk in head {
                 for block in &mut blocks {
                     *block = vaeseq_u8(*block, rk);
@@ -124,7 +166,7 @@ impl<const K: usize, const N: usize> Aes<K, N> {
         let src = src.remainder();
         for (dst, src) in dst.iter_mut().zip(src) {
             let mut block = vld1q_u8(src.as_ptr());
-            let (head, tail) = self.enc.split_at(self.enc.len() - 2);
+            let (head, tail) = self.keys.split_at(self.keys.len() - 2);
             for &rk in head {
                 block = vaeseq_u8(block, rk);
                 block = vaesmcq_u8(block);
@@ -141,11 +183,68 @@ impl<const K: usize, const N: usize> Aes<K, N> {
     /// enabled.
     #[inline]
     #[target_feature(enable = "neon,aes")]
-    pub unsafe fn encrypt_block_in_place(&self, data: &mut [u8; BLOCK_SIZE]) {
+    unsafe fn encrypt_blocks_in_place(&self, blocks: &mut [Block<Self>]) {
+        const { check_sizes::<K, N>() }
+        debug_assert!(supported());
+
+        const STRIDE: usize = 8;
+        let mut chunks = blocks.chunks_exact_mut(STRIDE);
+        for chunk in chunks.by_ref() {
+            let (hi, lo) = chunk.split_at(chunk.len() / 2);
+            let uint8x16x4_t(p0, p1, p2, p3) = vld1q_u8_x4(lo.as_ptr().cast());
+            let uint8x16x4_t(p4, p5, p6, p7) = vld1q_u8_x4(hi.as_ptr().cast());
+
+            let mut blocks = [p0, p1, p2, p3, p4, p5, p6, p7];
+
+            let (head, tail) = self.keys.split_at(self.keys.len() - 2);
+            for &rk in head {
+                for block in &mut blocks {
+                    *block = vaeseq_u8(*block, rk);
+                    *block = vaesmcq_u8(*block);
+                }
+            }
+            for block in &mut blocks {
+                *block = vaeseq_u8(*block, tail[0]);
+                *block = veorq_u8(*block, tail[1]);
+            }
+
+            let (lo, hi) = chunk.split_at_mut(chunk.len() / 2);
+            vst1q_u8_x4(
+                lo.as_mut_ptr().cast(),
+                uint8x16x4_t(blocks[0], blocks[1], blocks[2], blocks[3]),
+            );
+            vst1q_u8_x4(
+                hi.as_mut_ptr().cast(),
+                uint8x16x4_t(blocks[4], blocks[5], blocks[6], blocks[7]),
+            );
+        }
+
+        let chunks = chunks.into_remainder();
+        for chunk in chunks {
+            let mut block = vld1q_u8(chunk.as_ptr());
+            let (head, tail) = self.keys.split_at(self.keys.len() - 2);
+            for &rk in head {
+                block = vaeseq_u8(block, rk);
+                block = vaesmcq_u8(block);
+            }
+            block = vaeseq_u8(block, tail[0]);
+            block = veorq_u8(block, tail[1]);
+            vst1q_u8(chunk.as_mut_ptr(), block);
+        }
+    }
+
+    /// # Safety
+    ///
+    /// The NEON and AES architectural features must be
+    /// enabled.
+    #[inline]
+    #[target_feature(enable = "neon,aes")]
+    unsafe fn encrypt_block_in_place(&self, data: &mut Block<Self>) {
+        const { check_sizes::<K, N>() }
         debug_assert!(supported());
 
         let mut block = vld1q_u8(data.as_ptr());
-        let (head, tail) = self.enc.split_at(self.enc.len() - 2);
+        let (head, tail) = self.keys.split_at(self.keys.len() - 2);
         for &rk in head {
             block = vaeseq_u8(block, rk);
             block = vaesmcq_u8(block);
@@ -161,11 +260,126 @@ impl<const K: usize, const N: usize> Aes<K, N> {
     /// enabled.
     #[inline]
     #[target_feature(enable = "neon,aes")]
-    pub unsafe fn decrypt_block(&self, dst: &mut [u8; BLOCK_SIZE], src: &[u8; BLOCK_SIZE]) {
+    unsafe fn xctr(&self, dst: &mut [u8], src: &[u8], nonce: &Block<Self>) {
+        const { check_sizes::<K, N>() }
+        debug_assert!(supported());
+
+        xctr_asm(&self.keys, dst, src, nonce)
+    }
+}
+
+impl<const K: usize, const N: usize> Stride for AesEnc<K, N> {
+    type Stride = U8;
+}
+
+impl<const K: usize, const N: usize> BlockSize for AesEnc<K, N> {
+    type BlockSize = U16;
+}
+
+impl<const K: usize, const N: usize> BlockBackend for AesEnc<K, N> {
+    fn proc_block(&self, dst: &mut Block<Self>, src: &Block<Self>) {
+        const { check_sizes::<K, N>() }
+        assert!(supported());
+
+        // SAFETY: We've asserted that we have AES support.
+        unsafe { self.encrypt_block(dst, src) }
+    }
+
+    fn proc_block_in_place(&self, block: &mut Block<Self>) {
+        const { check_sizes::<K, N>() }
+        assert!(supported());
+
+        // SAFETY: We've asserted that we have AES support.
+        unsafe { self.encrypt_block_in_place(block) }
+    }
+
+    fn proc_blocks(&self, dst: &mut Blocks<Self>, src: &Blocks<Self>) {
+        const { check_sizes::<K, N>() }
+        assert!(supported());
+
+        // SAFETY: We've asserted that we have AES support.
+        unsafe { self.encrypt_blocks(dst, src) }
+    }
+
+    fn proc_blocks_in_place(&self, blocks: &mut Blocks<Self>) {
+        const { check_sizes::<K, N>() }
+        assert!(supported());
+
+        // SAFETY: We've asserted that we have AES support.
+        unsafe { self.encrypt_blocks_in_place(blocks) }
+    }
+}
+
+#[cfg(feature = "zeroize")]
+impl<const K: usize, const N: usize> zeroize::ZeroizeOnDrop for AesEnc<K, N> {}
+
+impl<const K: usize, const N: usize> Drop for AesEnc<K, N> {
+    fn drop(&mut self) {
+        #[cfg(feature = "zeroize")]
+        {
+            zeroize::Zeroize::zeroize(&mut self.keys.iter_mut());
+        }
+
+        #[cfg(not(feature = "zeroize"))]
+        {
+            for k in &mut self.keys {
+                *k = unsafe { veorq_u8(*k, *k) };
+            }
+        }
+    }
+}
+
+/// - `K`: key size in bytes.
+/// - `N`: number of round keys.
+#[derive(Clone)]
+#[repr(transparent)]
+pub(super) struct AesDec<const K: usize, const N: usize> {
+    keys: [uint8x16_t; N],
+}
+
+impl<const K: usize, const N: usize> AesDec<K, N> {
+    /// # Safety
+    ///
+    /// The NEON and AES architectural features must be
+    /// enabled.
+    #[inline]
+    #[target_feature(enable = "neon,aes")]
+    unsafe fn new(key: &[u8; K]) -> Self {
+        const { check_sizes::<K, N>() }
+        debug_assert!(supported());
+
+        let enc = AesEnc::new(key);
+        Self::from_enc(&enc)
+    }
+
+    /// # Safety
+    ///
+    /// The NEON and AES architectural features must be
+    /// enabled.
+    #[inline]
+    #[target_feature(enable = "neon,aes")]
+    unsafe fn from_enc(enc: &AesEnc<K, N>) -> Self {
+        const { check_sizes::<K, N>() }
+        debug_assert!(supported());
+
+        // SAFETY: `invert_enc_keys` requires the `aes`
+        // and `neon` target features, which we have.
+        let keys = unsafe { invert_enc_keys(&enc.keys) };
+        Self { keys }
+    }
+
+    /// # Safety
+    ///
+    /// The NEON and AES architectural features must be
+    /// enabled.
+    #[inline]
+    #[target_feature(enable = "neon,aes")]
+    unsafe fn decrypt_block(&self, dst: &mut Block<Self>, src: &Block<Self>) {
+        const { check_sizes::<K, N>() }
         debug_assert!(supported());
 
         let mut block = vld1q_u8(src.as_ptr());
-        let (head, tail) = self.dec.split_at(self.dec.len() - 2);
+        let (head, tail) = self.keys.split_at(self.keys.len() - 2);
         for &rk in head {
             block = vaesdq_u8(block, rk);
             block = vaesimcq_u8(block);
@@ -181,11 +395,12 @@ impl<const K: usize, const N: usize> Aes<K, N> {
     /// enabled.
     #[inline]
     #[target_feature(enable = "neon,aes")]
-    pub unsafe fn decrypt_block_in_place(&self, data: &mut [u8; BLOCK_SIZE]) {
+    unsafe fn decrypt_block_in_place(&self, data: &mut Block<Self>) {
+        const { check_sizes::<K, N>() }
         debug_assert!(supported());
 
         let mut block = vld1q_u8(data.as_ptr());
-        let (head, tail) = self.dec.split_at(self.dec.len() - 2);
+        let (head, tail) = self.keys.split_at(self.keys.len() - 2);
         for &rk in head {
             block = vaesdq_u8(block, rk);
             block = vaesimcq_u8(block);
@@ -194,38 +409,62 @@ impl<const K: usize, const N: usize> Aes<K, N> {
         block = veorq_u8(block, tail[1]);
         vst1q_u8(data.as_mut_ptr(), block)
     }
+}
 
-    /// # Safety
-    ///
-    /// The NEON and AES architectural features must be
-    /// enabled.
-    #[inline]
-    #[target_feature(enable = "neon,aes")]
-    pub unsafe fn xctr(&self, dst: &mut [u8], src: &[u8], nonce: &[u8; BLOCK_SIZE]) {
-        debug_assert!(supported());
+impl<const K: usize, const N: usize> Stride for AesDec<K, N> {
+    type Stride = U8;
+}
 
-        xctr_asm(&self.enc, dst, src, nonce)
+impl<const K: usize, const N: usize> BlockSize for AesDec<K, N> {
+    type BlockSize = U16;
+}
+
+impl<const K: usize, const N: usize> BlockBackend for AesDec<K, N> {
+    fn proc_block(&self, dst: &mut Block<Self>, src: &Block<Self>) {
+        const { check_sizes::<K, N>() }
+        assert!(supported());
+
+        // SAFETY: We've asserted that we have AES support.
+        unsafe { self.decrypt_block(dst, src) }
     }
+
+    fn proc_block_in_place(&self, block: &mut Block<Self>) {
+        const { check_sizes::<K, N>() }
+        assert!(supported());
+
+        // SAFETY: We've asserted that we have AES support.
+        unsafe { self.decrypt_block_in_place(block) }
+    }
+
+    // TODO
+    // fn proc_blocks(&self, dst: &mut Blocks<Self>, src: &Blocks<Self>) {
+    //     assert!(supported());
+
+    //     // SAFETY: We've asserted that we have AES support.
+    //     unsafe { self.decrypt_blocks(dst, src) }
+    // }
+
+    // fn proc_blocks_in_place(&self, blocks: &mut Blocks<Self>) {
+    //     assert!(supported());
+
+    //     // SAFETY: We've asserted that we have AES support.
+    //     unsafe { self.decrypt_blocks_in_place(blocks) }
+    // }
 }
 
 #[cfg(feature = "zeroize")]
-impl<const K: usize, const N: usize> zeroize::ZeroizeOnDrop for Aes<K, N> {}
+impl<const K: usize, const N: usize> zeroize::ZeroizeOnDrop for AesDec<K, N> {}
 
-impl<const K: usize, const N: usize> Drop for Aes<K, N> {
+impl<const K: usize, const N: usize> Drop for AesDec<K, N> {
     fn drop(&mut self) {
         #[cfg(feature = "zeroize")]
         {
-            use zeroize::Zeroize;
-            self.enc.iter_mut().zeroize();
-            self.dec.iter_mut().zeroize();
+            zeroize::Zeroize::zeroize(&mut self.keys.iter_mut());
         }
 
         #[cfg(not(feature = "zeroize"))]
         {
-            for k in &mut self.enc {
-                *k = unsafe { veorq_u8(*k, *k) };
-            }
-            for k in &mut self.dec {
+            for k in &mut self.keys {
                 *k = unsafe { veorq_u8(*k, *k) };
             }
         }
@@ -245,9 +484,8 @@ const ROUND_CONSTS: [u32; 10] = [0x01, 0x02, 0x04, 0x08, 0x10, 0x20, 0x40, 0x80,
 #[inline]
 #[target_feature(enable = "neon,aes")]
 unsafe fn expand_key<const K: usize, const N: usize>(key: &[u8; K]) -> [uint8x16_t; N] {
+    const { check_sizes::<K, N>() }
     debug_assert!(supported());
-
-    const { assert!((K == 16 && N == 11) || (K == 24 && N == 13) || (K == 32 && N == 15)) }
 
     let mut keys = array::from_fn(|_| vdupq_n_u8(0));
 
@@ -289,9 +527,8 @@ unsafe fn expand_key<const K: usize, const N: usize>(key: &[u8; K]) -> [uint8x16
 #[inline]
 #[target_feature(enable = "neon,aes")]
 unsafe fn invert_enc_keys<const N: usize>(keys: &[uint8x16_t; N]) -> [uint8x16_t; N] {
-    debug_assert!(supported());
-
     const { assert!(N == 11 || N == 13 || N == 15) }
+    debug_assert!(supported());
 
     array::from_fn(|i| {
         if i == 0 {
@@ -329,7 +566,7 @@ unsafe fn xctr_asm<const N: usize>(
     rk: &[uint8x16_t; N],
     dst: &mut [u8],
     src: &[u8],
-    nonce: &[u8; BLOCK_SIZE],
+    nonce: &Block<U16>,
 ) {
     const { assert!(N == 11 || N == 13 || N == 15) }
 
@@ -413,7 +650,7 @@ unsafe fn xctr_asm2<const N: usize>(
     rk: &[uint8x16_t; N],
     dst: &mut [u8],
     src: &[u8],
-    nonce: &[u8; BLOCK_SIZE],
+    nonce: &Block<U16>,
 ) {
     const { assert!(N == 11 || N == 13 || N == 15) }
 
@@ -494,7 +731,7 @@ unsafe fn xctr_asm0<const N: usize>(
     rk: &[uint8x16_t; N],
     dst: &mut [u8],
     src: &[u8],
-    nonce: &[u8; BLOCK_SIZE],
+    nonce: &Block<U16>,
 ) {
     const { assert!(N == 11 || N == 13 || N == 15) }
 
@@ -528,9 +765,17 @@ mod tests {
 
     use super::*;
 
-    impl<const K: usize, const N: usize> Aes<K, N> {
-        fn enc_round_keys(&self) -> Vec<u32> {
-            self.enc
+    type AesEnc128 = AesEnc<16, 11>;
+    type AesEnc192 = AesEnc<24, 13>;
+    type AesEnc256 = AesEnc<32, 15>;
+
+    type AesDec128 = AesDec<16, 11>;
+    type AesDec192 = AesDec<24, 13>;
+    type AesDec256 = AesDec<32, 15>;
+
+    impl<const K: usize, const N: usize> AesEnc<K, N> {
+        fn round_keys(&self) -> Vec<u32> {
+            self.keys
                 .iter()
                 .flat_map(|k| {
                     let k = unsafe { vreinterpretq_u32_u8(*k) };
@@ -542,9 +787,11 @@ mod tests {
                 })
                 .collect()
         }
+    }
 
-        fn dec_round_keys(&self) -> Vec<u32> {
-            self.dec
+    impl<const K: usize, const N: usize> AesDec<K, N> {
+        fn round_keys(&self) -> Vec<u32> {
+            self.keys
                 .iter()
                 .flat_map(|k| {
                     let k = unsafe { vreinterpretq_u32_u8(*k) };
@@ -568,7 +815,6 @@ mod tests {
             0x2b, 0x7e, 0x15, 0x16, 0x28, 0xae, 0xd2, 0xa6, 0xab, 0xf7, 0x15, 0x88, 0x09, 0xcf,
             0x4f, 0x3c,
         ];
-        let aes = unsafe { Aes128::new(&KEY) };
         const ENC_WANT: &[u32] = &[
             0x2b7e1516, 0x28aed2a6, 0xabf71588, 0x09cf4f3c, 0xa0fafe17, 0x88542cb1, 0x23a33939,
             0x2a6c7605, 0xf2c295f2, 0x7a96b943, 0x5935807a, 0x7359f67f, 0x3d80477d, 0x4716fe3e,
@@ -578,9 +824,6 @@ mod tests {
             0x7f8d292f, 0xac7766f3, 0x19fadc21, 0x28d12941, 0x575c006e, 0xd014f9a8, 0xc9ee2589,
             0xe13f0cc8, 0xb6630ca6,
         ];
-        let got = aes.enc_round_keys();
-        assert_eq!(got, ENC_WANT);
-
         const DEC_WANT: &[u32] = &[
             0xd014f9a8, 0xc9ee2589, 0xe13f0cc8, 0xb6630ca6, 0xc7b5a63, 0x1319eafe, 0xb0398890,
             0x664cfbb4, 0xdf7d925a, 0x1f62b09d, 0xa320626e, 0xd6757324, 0x12c07647, 0xc01f22c7,
@@ -590,7 +833,13 @@ mod tests {
             0xc9481133, 0x2b3708a7, 0xf262d405, 0xbc3ebdbf, 0x4b617d62, 0x2b7e1516, 0x28aed2a6,
             0xabf71588, 0x9cf4f3c,
         ];
-        let got = aes.dec_round_keys();
+
+        let enc = unsafe { AesEnc128::new(&KEY) };
+        let got = enc.round_keys();
+        assert_eq!(got, ENC_WANT);
+
+        let dec = unsafe { AesDec128::from_enc(&enc) };
+        let got = dec.round_keys();
         assert_eq!(got, DEC_WANT);
     }
 
@@ -613,19 +862,20 @@ mod tests {
             0xc5, 0x5a,
         ];
 
-        let aes = unsafe { Aes128::new(&KEY) };
-        let mut got = [0; 16];
-        unsafe { aes.encrypt_block(&mut got, &PT) }
-        assert_eq!(got, CT, "`encrypt_block`");
+        let enc = unsafe { AesEnc128::new(&KEY) };
+        let mut got = Block::<U16>::default();
+        unsafe { enc.encrypt_block(&mut got, &PT.into()) }
+        assert_eq!(got.as_slice(), &CT, "`encrypt_block`");
 
-        unsafe { aes.decrypt_block(&mut got, &CT) }
-        assert_eq!(got, PT, "`decrypt_block`");
+        let dec = unsafe { AesDec128::from_enc(&enc) };
+        unsafe { dec.decrypt_block(&mut got, &CT.into()) }
+        assert_eq!(got.as_slice(), &PT, "`decrypt_block`");
 
-        let mut got = PT;
-        unsafe { aes.encrypt_block_in_place(&mut got) }
-        assert_eq!(got, CT, "`encrypt_block_in_place`");
+        let mut got = PT.into();
+        unsafe { enc.encrypt_block_in_place(&mut got) }
+        assert_eq!(got.as_slice(), &CT, "`encrypt_block_in_place`");
 
-        unsafe { aes.decrypt_block_in_place(&mut got) }
-        assert_eq!(got, PT, "`decrypt_block_in_place`");
+        unsafe { dec.decrypt_block_in_place(&mut got) }
+        assert_eq!(got.as_slice(), &PT, "`decrypt_block_in_place`");
     }
 }

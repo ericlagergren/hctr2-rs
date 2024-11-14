@@ -1,16 +1,47 @@
-//! The HCTR2 length-preserving encryption algorithm.
+//! The [HCTR2] length-preserving encryption algorithm.
 //!
-//! HCTR2 is designed for situations where the length of the
-//! ciphertext must exactly match the length of the plaintext,
-//! like disk encryption.
+//! HCTR2 is a tweakable super-pseudorandom permutation designed
+//! for situations where the length of the ciphertext must
+//! exactly match the length of the plaintext, like disk
+//! encryption.
 //!
-//! This implementation uses a hardware-accelerated POLYVAL
-//! implementation when possible; the block cipher is left to the
-//! caller. The recommended block cipher is AES. The
-//! [`aes`][mod@aes] module provides optimized AES
-//! implementations.
+//! This crate provides the standard AES-based instantiations by
+//! default. In also provides opt-in support for custom block
+//! ciphers and reduction polynomials.
 //!
-//! [hctr2]: https://eprint.iacr.org/2021/1441
+//! # Examples
+//!
+//! ```rust
+//! use hctr2::{Hctr2Aes256, hazmat::Hctr2};
+//!
+//! let hctr = Hctr2Aes256::new(&[
+//!     0x74, 0xf9, 0x8f, 0x60, 0x78, 0x6a, 0xbf, 0xa8,
+//!     0x5b, 0x0b, 0xbb, 0xa0, 0x59, 0xe0, 0xf9, 0x1e,
+//! ]);
+//! let mut data = [
+//!     0x6b, 0x26, 0x83, 0x7b, 0xdc, 0x1c, 0x58, 0x3d,
+//!     0xc1, 0x42, 0xc6, 0xab, 0x7b, 0x3f, 0x43, 0xb0,
+//! ];
+//! hctr.seal_in_place(&mut data, &[]);
+//! let want = [
+//!     0xdd, 0x05, 0xa8, 0xae, 0x51, 0xf1, 0xe8, 0x21,
+//!     0x2f, 0xd6, 0xc3, 0x3b, 0x94, 0x67, 0x03, 0x6d,
+//! ];
+//! assert_eq!(data, want);
+//! ```
+//!
+//! # Features
+//!
+//! - `aes`: Enable the standard HCTR2 instantiations with
+//!   AES-128, AES-192, and AES-256 (default).
+//! - `hazmat`: Enable cryptographically dangerous features.
+//! - `polyval`: Enable POLYVAL support. (Enabled by `aes`.)
+//! - `soft`: Force software implementations where possible.
+//! - `std`: Enable `std` support.
+//! - `zeroize`: Enable [`zeroize`] support.
+//!
+//! [HCTR2]: https://eprint.iacr.org/2021/1441
+//! [`zeroize`]: https://docs.rs/zeroize/latest/zeroize/
 
 #![cfg_attr(docsrs, feature(doc_cfg))]
 #![cfg_attr(not(any(test, doctest, feature = "std")), no_std)]
@@ -38,10 +69,15 @@
     unused_qualifications
 )]
 
-pub mod aes;
+mod aes;
 mod block;
-mod cipher;
+pub mod hazmat;
+mod hctr;
+mod poly;
 mod tests;
 mod xctr;
 
-pub use crate::{block::BlockCipher, cipher::Hctr2};
+pub use aes::{Hctr2Aes128, Hctr2Aes192, Hctr2Aes256};
+pub use xctr::Foo;
+
+pub use crate::{block::BlockCipher, hctr::Error};

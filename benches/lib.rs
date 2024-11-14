@@ -1,15 +1,40 @@
 use core::{hint::black_box, time::Duration};
 
 use criterion::{criterion_group, criterion_main, BenchmarkId, Criterion, Throughput};
-use hctr2::{
-    aes::{Aes128, Aes256},
-    BlockCipher, Hctr2,
-};
+use hctr2::{Error, Hctr2Aes128, Hctr2Aes256};
 use pprof::criterion::{Output, PProfProfiler};
+
+#[allow(dead_code, reason = "TODO")]
+trait Sprp {
+    fn seal(&mut self, dst: &mut [u8], src: &[u8], tweak: &[u8]) -> Result<(), Error>;
+    fn open(&mut self, dst: &mut [u8], src: &[u8], tweak: &[u8]) -> Result<(), Error>;
+    fn seal_in_place(&mut self, data: &mut [u8], tweak: &[u8]) -> Result<(), Error>;
+    fn open_in_place(&mut self, data: &mut [u8], tweak: &[u8]) -> Result<(), Error>;
+}
+macro_rules! impl_sprp {
+    ($name:ident) => {
+        impl Sprp for $name {
+            fn seal(&mut self, dst: &mut [u8], src: &[u8], tweak: &[u8]) -> Result<(), Error> {
+                self.seal(dst, src, tweak)
+            }
+            fn open(&mut self, dst: &mut [u8], src: &[u8], tweak: &[u8]) -> Result<(), Error> {
+                self.open(dst, src, tweak)
+            }
+            fn seal_in_place(&mut self, data: &mut [u8], tweak: &[u8]) -> Result<(), Error> {
+                self.seal_in_place(data, tweak)
+            }
+            fn open_in_place(&mut self, data: &mut [u8], tweak: &[u8]) -> Result<(), Error> {
+                self.open_in_place(data, tweak)
+            }
+        }
+    };
+}
+impl_sprp!(Hctr2Aes128);
+impl_sprp!(Hctr2Aes256);
 
 fn bench_seal<C, F>(c: &mut Criterion, name: &'static str, f: &F)
 where
-    C: BlockCipher,
+    C: Sprp,
     F: Fn() -> C,
 {
     let mut g = c.benchmark_group(name);
@@ -17,8 +42,7 @@ where
         let mut i = 0;
         let mut dst = vec![0u8; *size];
         let src = vec![0u8; *size];
-        let block = f();
-        let mut cipher = Hctr2::new(block);
+        let mut cipher = f();
 
         g.throughput(Throughput::Bytes(*size as u64));
         let name = BenchmarkId::new("seal", *size);
@@ -37,15 +61,14 @@ where
 
 fn bench_seal_in_place<C, F>(c: &mut Criterion, name: &'static str, f: &F)
 where
-    C: BlockCipher,
+    C: Sprp,
     F: Fn() -> C,
 {
     let mut g = c.benchmark_group(name);
     for size in [512, 4096, 8182].iter() {
         let mut i = 0;
         let mut buf = vec![0u8; *size];
-        let block = f();
-        let mut cipher = Hctr2::new(block);
+        let mut cipher = f();
 
         g.throughput(Throughput::Bytes(*size as u64));
         let name = BenchmarkId::new("seal_in_place", *size);
@@ -64,7 +87,7 @@ where
 
 fn bench_alg<C, F>(c: &mut Criterion, name: &'static str, f: F)
 where
-    C: BlockCipher,
+    C: Sprp,
     F: Fn() -> C,
 {
     bench_seal(c, name, &f);
@@ -72,8 +95,8 @@ where
 }
 
 fn bench_throughput(c: &mut Criterion) {
-    bench_alg(c, "AES-128", || Aes128::new(&[0; 16]));
-    bench_alg(c, "AES-256", || Aes256::new(&[0; 32]));
+    bench_alg(c, "AES-128", || Hctr2Aes128::new(&[0; 16]));
+    bench_alg(c, "AES-256", || Hctr2Aes256::new(&[0; 32]));
 }
 
 criterion_group! {
