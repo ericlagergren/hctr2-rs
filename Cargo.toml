@@ -16,7 +16,6 @@ categories = [ "cryptography", "no-std", "no-std::no-alloc" ]
 [features]
 default = [
 	"aes",
-	# "zeroize",
 ]
 
 # Enable optimized `aes` implementations.
@@ -51,7 +50,7 @@ zeroize = [
 aes = { version = "0.8", default-features = false, features = ["hazmat"], optional = true }
 cfg-if = { version = "1", default-features = false }
 generic-array = { version = "1.1", default-features = false }
-polyhash = { version = "0.1", path = "/Users/eric/git/polyval-rs", optional = true }
+polyhash = { version = "0.1", path = "/Users/eric/git/polyval-rs", features = ["experimental"], optional = true }
 typenum = { version = "1.17" }
 zeroize = { version = "1.8", default-features = false, optional = true }
 
@@ -59,6 +58,8 @@ zeroize = { version = "1.8", default-features = false, optional = true }
 cpufeatures = { version = "0.2.14", default-features = false }
 
 [dev-dependencies]
+hctr2 = { path = ".", features = ["std"] }
+
 criterion = { version = "0.5" }
 hex = { version = "0.4", features = ["serde"] }
 pprof = { version = "0.12", features = ["criterion", "flamegraph", "protobuf-codec"] }

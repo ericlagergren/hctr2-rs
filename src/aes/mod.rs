@@ -103,10 +103,12 @@ macro_rules! impl_hctr {
         }
     };
 }
+
 impl_hctr! {
     /// HCTR2 with AES-128.
     Hctr2Aes128, Aes128, 16,
 }
+
 impl_hctr! {
     /// HCTR2 with AES-192.
     ///
@@ -117,6 +119,7 @@ impl_hctr! {
     /// [`Hctr2Aes256`] instead.
     Hctr2Aes192, Aes192, 24,
 }
+
 impl_hctr! {
     /// HCTR2 with AES-256.
     ///

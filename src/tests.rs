@@ -1,5 +1,6 @@
 #![cfg(test)]
 
+use hex::ToHex;
 use serde::Deserialize;
 
 use crate::{
@@ -100,9 +101,15 @@ macro_rules! hctr2_test {
 
                 let mut got = &mut vec![0u8; plaintext.len()];
 
+                println!();
                 c.seal(&mut got, &plaintext, &tweak)
                     .expect("should not fail");
-                assert_eq!(got, ciphertext, "#{i}: `seal`");
+                assert_eq!(
+                    got,
+                    ciphertext,
+                    "#{i}: `seal` {}",
+                    ciphertext.as_slice().encode_hex::<String>()
+                );
 
                 c.open(&mut got, &ciphertext, &tweak)
                     .expect("should not fail");

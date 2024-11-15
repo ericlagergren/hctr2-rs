@@ -42,20 +42,22 @@ where
     C: BlockCipher,
     P: Poly<BlockSize = <C as BlockSize>::BlockSize>,
 {
-    // Underlying block cipher.
+    /// The underlying block cipher.
     cipher: C,
-    // Ek(bin(1))
+    /// P keyed with Ek(bin(0)).
+    poly: P,
+    /// Ek(bin(1))
     l: Block<C>,
-    // The length of the provided tweak.
-    //
-    // Cached by `init_tweak`.
+    /// The length of the provided tweak.
+    ///
+    /// Cached by `init_tweak`.
     tweak_len: Option<usize>,
-    // The cached first block of the hash of the tweak for
-    // |M| % n == 0.
-    state0: P,
-    // The cached first block of the hash of the tweak for
-    // |M| % n != 0.
-    state1: P,
+    /// The cached first block of the hash of the tweak for
+    /// |M| % n == 0.
+    state0: P::State,
+    /// The cached first block of the hash of the tweak for
+    /// |M| % n != 0.
+    state1: P::State,
 }
 
 impl<C, P> Hctr2<C, P>
@@ -64,16 +66,14 @@ where
     P: Poly<BlockSize = <C as BlockSize>::BlockSize>,
 {
     const BLOCK_SIZE: usize = <C as BlockSize>::BlockSize::USIZE;
-    const MAX_TWEAK_SIZE: usize = (1 << (Self::BLOCK_SIZE - 1)) - 2;
+    const MAX_TWEAK_SIZE: usize = Self::BLOCK_SIZE;
 
     /// Creates an HCTR2 cipher.
     pub fn new(cipher: C) -> Self {
-        // h ← Ek(bin(0))
-        let h = {
+        let poly = {
+            // h ← Ek(bin(0))
             let mut h = Block::<C>::default();
             cipher.encrypt_block_in_place(&mut h);
-            // The probability that Ek(bin(0)) is non-zero is
-            // negligible.
             P::new(&h)
         };
 
@@ -84,10 +84,11 @@ where
 
         Hctr2 {
             cipher,
+            poly,
             l,
             tweak_len: None,
-            state0: h.clone(),
-            state1: h.clone(),
+            state0: P::State::default(),
+            state1: P::State::default(),
         }
     }
 
@@ -124,18 +125,18 @@ where
 
         self.init_tweak_len(tweak);
 
-        let mut poly = if n.len() % Self::BLOCK_SIZE == 0 {
-            self.state0.clone()
+        if n.len() % Self::BLOCK_SIZE == 0 {
+            self.poly.reset(&self.state0);
         } else {
-            self.state1.clone()
+            self.poly.reset(&self.state1);
         };
-        poly.update_padded(tweak);
+        self.poly.update_padded(tweak); // pad(T)
 
         // Save the state so we can reuse it later.
-        let state = poly.clone();
+        let state = self.poly.export();
 
         // MM ← M ⊕ H_h(T, N)
-        let t = polyhash(poly, n);
+        let t = self.polyhash(n);
         let mm = xor2::<C>(m, &t);
 
         // UU ← Ek(MM)
@@ -150,12 +151,15 @@ where
         let s = xor3::<C>(&mm, &uu, &self.l);
 
         let (u, v) = dst.split_at_mut(Self::BLOCK_SIZE);
-
+        if cfg!(test) {
+            println!("u={} v={}", u.len(), v.len());
+        }
         // V ← N ⊕ XCTR_k(S)[0;|N|]
         Xctr::new(&self.cipher).encrypt(v, n, &s);
 
         // U ← UU ⊕ Hh(T, V)
-        let t = polyhash(state, v);
+        self.poly.reset(&state);
+        let t = self.polyhash(v);
         xor_block_into::<C>(u, &uu, &t);
 
         Ok(())
@@ -187,18 +191,18 @@ where
 
         self.init_tweak_len(tweak);
 
-        let mut poly = if n.len() % Self::BLOCK_SIZE == 0 {
-            self.state0.clone()
+        if n.len() % Self::BLOCK_SIZE == 0 {
+            self.poly.reset(&self.state0);
         } else {
-            self.state1.clone()
+            self.poly.reset(&self.state1);
         };
-        poly.update_padded(tweak);
+        self.poly.update_padded(tweak); // pad(T)
 
         // Save the state so we can reuse it later.
-        let state = poly.clone();
+        let state = self.poly.export();
 
         // MM ← M ⊕ H_h(T, N)
-        let t = polyhash(poly, n);
+        let t = self.polyhash(n);
         let mm = xor2::<C>(m, &t);
 
         // UU ← Ek(MM)
@@ -216,53 +220,66 @@ where
         Xctr::new(&self.cipher).encrypt_in_place(n, &s);
 
         // U ← UU ⊕ Hh(T, V)
-        let t = polyhash(state, n);
+        self.poly.reset(&state);
+        let t = self.polyhash(n);
         xor_block_into::<C>(m, &uu, &t);
 
         Ok(())
     }
 
+    /// Hash a message.
+    fn polyhash(&mut self, m: &[u8]) -> Block<P> {
+        // H_h(T, M) is defined as
+        //
+        // If n divides |M|:
+        //    POLYVAL(h, bin(2*|T| + 2) || pad(T) || M)
+        // else:
+        //    POLYVAL(h, bin(2*|T| + 3) || pad(T) || pad(M || 1))
+        //
+        // Here, `self.poly` is initialized with either
+        //
+        //    POLYVAL(h, bin(2*|T| + 2) || pad(T))
+        //    POLYVAL(h, bin(2*|T| + 3) || pad(T))
+        //
+        // So, write M or pad(M || 1) accordingly.
+        let (head, tail) = GenericArray::chunks_from_slice(m);
+        if cfg!(test) {
+            println!("m={} head={} tail={}", m.len(), head.len(), tail.len());
+        }
+        if !head.is_empty() {
+            self.poly.update(head);
+        }
+        if !tail.is_empty() {
+            let mut block = Block::<P>::default();
+            #[allow(
+                clippy::indexing_slicing,
+                reason = "The compiler can prove the slice is in bounds."
+            )]
+            block[..tail.len()].copy_from_slice(tail);
+            block[tail.len()] = 1;
+            self.poly.update(&[block]);
+        }
+        self.poly.tag()
+    }
+
     fn init_tweak_len(&mut self, tweak: &[u8]) {
+        if self.tweak_len.is_some_and(|n| n == tweak.len()) {
+            // Fast path. We've already initialized `state0` and
+            // `state1` with this tweak length.
+            return;
+        }
+
         // The first block in the hash of the tweak is the same
         // so long as the length of the tweak is the same, so
         // cache it.
-        match self.tweak_len {
-            // Fast path. We've already initialized `state0` and
-            // `state1` with this tweak length.
-            Some(n) if n == tweak.len() => return,
-            // Slow path. We've already initialized `state0` and
-            // `state1`, but for a different tweak length.
-            Some(_) => return self.update_tweak_len(tweak),
-            // Initial path. We haven't updated either `state0`
-            // or `state1` yet.
-            None => {
-                // TODO(eric): Debug assert that `state0` and
-                // `state1` are both initialized to `h`.
 
-                self.state0.update(&[state::<C>(tweak, false)]);
-                self.state1.update(&[state::<C>(tweak, true)]);
+        self.poly.reset(&P::State::default());
+        self.poly.update(&[initial_state::<C>(tweak, false)]);
+        self.state0 = self.poly.export();
 
-                self.tweak_len = Some(tweak.len());
-            }
-        }
-    }
-
-    #[cold]
-    fn update_tweak_len(&mut self, tweak: &[u8]) {
-        // h ← Ek(bin(0))
-        let h = {
-            let mut h = Block::<C>::default();
-            self.cipher.encrypt_block_in_place(&mut h);
-            // The probability that Ek(bin(0)) is non-zero is
-            // negligible.
-            P::new(&h)
-        };
-
-        self.state0.clone_from(&h);
-        self.state0.update(&[state::<C>(tweak, false)]);
-
-        self.state1.clone_from(&h);
-        self.state1.update(&[state::<C>(tweak, true)]);
+        self.poly.reset(&P::State::default());
+        self.poly.update(&[initial_state::<C>(tweak, true)]);
+        self.state1 = self.poly.export();
 
         self.tweak_len = Some(tweak.len());
     }
@@ -278,8 +295,10 @@ where
     }
 }
 
+/// Computes the initial block written to `poly`.
+///
 /// `odd` is true for |M| % n != 0.
-fn state<S: BlockSize>(tweak: &[u8], odd: bool) -> Block<S> {
+fn initial_state<S: BlockSize>(tweak: &[u8], odd: bool) -> Block<S> {
     // TODO: overflows?
     if tweak.len() > (usize::MAX / 16 - 2) as usize {
         // TODO
@@ -292,31 +311,10 @@ fn state<S: BlockSize>(tweak: &[u8], odd: bool) -> Block<S> {
     //    POLYVAL(h, bin(2*|T| + 2) || pad(T) || M)
     // else:
     //    POLYVAL(h, bin(2*|T| + 3) || pad(T) || pad(M || 1))
-    let t = 2 * (tweak.len() * 8) + 2 + odd as usize;
+    let t = (2 * (tweak.len() * 8)) + 2 + odd as usize;
     let mut l = Block::<S>::default();
     l[..usize::BITS as usize / 8].copy_from_slice(&t.to_le_bytes());
     l
-}
-
-/// Hash a message.
-///
-/// `p` must be initialized with the tweak length.
-fn polyhash<P: Poly>(mut p: P, src: &[u8]) -> Block<P> {
-    let (head, tail) = GenericArray::chunks_from_slice(src);
-    if !head.is_empty() {
-        p.update(head);
-    }
-    if !tail.is_empty() {
-        let mut block = Block::<P>::default();
-        #[allow(
-            clippy::indexing_slicing,
-            reason = "The compiler can prove the slice is in bounds."
-        )]
-        block[..tail.len()].copy_from_slice(tail);
-        block[tail.len()] = 1;
-        p.update(&[block]);
-    }
-    p.tag()
 }
 
 /// Returns x^y.
