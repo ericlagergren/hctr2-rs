@@ -2,25 +2,23 @@ use generic_array::{ArrayLength, GenericArray};
 use typenum::{UInt, Unsigned};
 
 /// A block cipher.
+///
+/// # ⚠️ Warning
+///
+/// This is a low-level primitive. Only use it if you know what
+/// you are doing.
 pub trait BlockCipher: BlockSize + Sized {
     /// Encrypt block(s) with a particular backend.
     fn encrypt_with_backend(&self, f: impl BlockClosure<BlockSize = Self::BlockSize>);
 
     /// Encrypts `src` into `dst`.
     fn encrypt_block(&self, dst: &mut Block<Self>, src: &Block<Self>) {
-        self.encrypt_with_backend(BlockCtx { dst, src })
+        self.encrypt_with_backend(BlockCtx { dst, src });
     }
 
     /// Encrypts `block` in place.
     fn encrypt_block_in_place(&self, block: &mut Block<Self>) {
-        self.encrypt_with_backend(InPlaceBlockCtx { block })
-    }
-
-    /// Encrypts `src` into `dst`.
-    fn encrypt_blocks(&self, dst: &mut [Block<Self>], src: &[Block<Self>]) {
-        assert_eq!(dst.len(), src.len());
-
-        self.encrypt_with_backend(BlocksCtx { dst, src })
+        self.encrypt_with_backend(InPlaceBlockCtx { block });
     }
 
     /// Decrypt block(s) with a particular backend.
@@ -28,23 +26,26 @@ pub trait BlockCipher: BlockSize + Sized {
 
     /// Decrypts `src` into `dst`.
     fn decrypt_block(&self, dst: &mut Block<Self>, src: &Block<Self>) {
-        self.decrypt_with_backend(BlockCtx { dst, src })
-    }
-
-    /// Decrypts `block` in place.
-    fn decrypt_block_in_place(&self, block: &mut Block<Self>) {
-        self.decrypt_with_backend(InPlaceBlockCtx { block })
-    }
-
-    /// Decrypts `src` into `dst`.
-    fn decrypt_blocks(&self, dst: &mut [Block<Self>], src: &[Block<Self>]) {
-        assert_eq!(dst.len(), src.len());
-
-        self.decrypt_with_backend(BlocksCtx { dst, src })
+        self.decrypt_with_backend(BlockCtx { dst, src });
     }
 }
 
-/// TODO
+impl<C: BlockCipher> BlockCipher for &C {
+    // TODO(eric): Other methods.
+    fn encrypt_with_backend(&self, f: impl BlockClosure<BlockSize = Self::BlockSize>) {
+        (*self).encrypt_with_backend(f)
+    }
+    fn decrypt_with_backend(&self, f: impl BlockClosure<BlockSize = Self::BlockSize>) {
+        (*self).decrypt_with_backend(f)
+    }
+}
+
+/// Used by [`BlockBackend`].
+///
+/// # ⚠️ Warning
+///
+/// This is a low-level primitive. Only use it if you know what
+/// you are doing.
 pub trait BlockClosure: BlockSize {
     /// Invokes the closure with a [`BlockBackend`].
     fn call<B: BlockBackend<BlockSize = Self::BlockSize>>(self, backend: &mut B);
@@ -56,6 +57,14 @@ pub trait BlockSize {
     type BlockSize: ArrayLength;
 }
 
+impl<T: BlockSize> BlockSize for &T {
+    type BlockSize = T::BlockSize;
+}
+
+impl<T: BlockSize> BlockSize for &mut T {
+    type BlockSize = T::BlockSize;
+}
+
 impl<U, B> BlockSize for UInt<U, B>
 where
     Self: ArrayLength,
@@ -64,9 +73,19 @@ where
 }
 
 /// A single block of data.
+///
+/// # ⚠️ Warning
+///
+/// This is a low-level primitive. Only use it if you know what
+/// you are doing.
 pub type Block<C> = GenericArray<u8, <C as BlockSize>::BlockSize>;
 
-/// Implemented by types that act on blocks.
+/// Implemented by block cipher backends.
+///
+/// # ⚠️ Warning
+///
+/// This is a low-level primitive. Only use it if you know what
+/// you are doing.
 pub trait BlockBackend: BlockSize + Stride {
     /// Process a single block from `src` into `dst`.
     fn proc_block(&self, dst: &mut Block<Self>, src: &Block<Self>);
@@ -75,6 +94,7 @@ pub trait BlockBackend: BlockSize + Stride {
     fn proc_block_in_place(&self, block: &mut Block<Self>);
 
     /// Process a multiple blocks from `src` into `dst`.
+    #[inline(always)]
     fn proc_blocks(&self, dst: &mut Blocks<Self>, src: &Blocks<Self>) {
         assert_eq!(dst.len(), src.len());
 
@@ -84,6 +104,7 @@ pub trait BlockBackend: BlockSize + Stride {
     }
 
     /// Process a multiple blocks in place.
+    #[inline(always)]
     fn proc_blocks_in_place(&self, blocks: &mut Blocks<Self>) {
         for block in blocks {
             self.proc_block_in_place(block);
@@ -92,12 +113,22 @@ pub trait BlockBackend: BlockSize + Stride {
 }
 
 /// Specifies the number of blocks processed at once.
+///
+/// # ⚠️ Warning
+///
+/// This is a low-level primitive. Only use it if you know what
+/// you are doing.
 pub trait Stride {
     /// The number of blocks processed at once.
     type Stride: ArrayLength;
 }
 
 /// A group of blocks processed at once.
+///
+/// # ⚠️ Warning
+///
+/// This is a low-level primitive. Only use it if you know what
+/// you are doing.
 pub type Blocks<B> = GenericArray<Block<B>, <B as Stride>::Stride>;
 
 struct BlockCtx<'a, S: ArrayLength> {
@@ -110,6 +141,7 @@ impl<S: ArrayLength> BlockSize for BlockCtx<'_, S> {
 }
 
 impl<S: ArrayLength> BlockClosure for BlockCtx<'_, S> {
+    #[inline(always)]
     fn call<B: BlockBackend<BlockSize = S>>(self, backend: &mut B) {
         backend.proc_block(self.dst, self.src)
     }
@@ -124,6 +156,7 @@ impl<S: ArrayLength> BlockSize for InPlaceBlockCtx<'_, S> {
 }
 
 impl<S: ArrayLength> BlockClosure for InPlaceBlockCtx<'_, S> {
+    #[inline(always)]
     fn call<B: BlockBackend<BlockSize = S>>(self, backend: &mut B) {
         backend.proc_block_in_place(self.block)
     }
@@ -138,11 +171,8 @@ impl<S: ArrayLength> BlockSize for BlocksCtx<'_, S> {
     type BlockSize = S;
 }
 
-impl<S: ArrayLength> Stride for BlocksCtx<'_, S> {
-    type Stride = S;
-}
-
 impl<S: ArrayLength> BlockClosure for BlocksCtx<'_, S> {
+    #[inline(always)]
     fn call<B: BlockBackend<BlockSize = S>>(self, backend: &mut B) {
         if B::Stride::USIZE > 1 {
             // TODO
@@ -167,6 +197,7 @@ impl<S: ArrayLength> Stride for BlocksCtxInPlace<'_, S> {
 }
 
 impl<S: ArrayLength> BlockClosure for BlocksCtxInPlace<'_, S> {
+    #[inline(always)]
     fn call<B: BlockBackend<BlockSize = S>>(self, backend: &mut B) {
         if B::Stride::USIZE > 1 {
             // TODO

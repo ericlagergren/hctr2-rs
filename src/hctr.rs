@@ -1,13 +1,23 @@
-use core::{error, fmt};
+use core::{error, fmt, marker::PhantomData};
 
-use generic_array::GenericArray;
 use typenum::Unsigned;
 
 use super::{
     block::{Block, BlockCipher, BlockSize},
     poly::Poly,
-    xctr::Xctr,
+    util::{xor2, xor3, xor_block_into},
+    xctr::XctrCore,
 };
+
+#[allow(unused_macros, reason = "For debugging only")]
+macro_rules! dprintln {
+    ($($tt:tt)*) => {
+        #[cfg(test)] {
+            println!($($tt)*);
+        }
+    }
+}
+pub(crate) use dprintln;
 
 /// An error returned by this API.
 #[derive(Copy, Clone, Debug)]
@@ -30,7 +40,7 @@ impl error::Error for Error {}
 
 /// An instance of HCTR2.
 ///
-/// # Warning
+/// # ⚠️ Warning
 ///
 /// This is a low-level primitive. Only use it if you know what
 /// you are doing. When in doubt, use
@@ -40,11 +50,11 @@ impl error::Error for Error {}
 pub struct Hctr2<C, P>
 where
     C: BlockCipher,
-    P: Poly<BlockSize = <C as BlockSize>::BlockSize>,
+    P: Poly<BlockSize = C::BlockSize>,
 {
     /// The underlying block cipher.
     cipher: C,
-    /// P keyed with Ek(bin(0)).
+    /// Keyed with Ek(bin(0)).
     poly: P,
     /// Ek(bin(1))
     l: Block<C>,
@@ -58,17 +68,33 @@ where
     /// The cached first block of the hash of the tweak for
     /// |M| % n != 0.
     state1: P::State,
+    _xctr: PhantomData<()>,
 }
 
 impl<C, P> Hctr2<C, P>
 where
     C: BlockCipher,
-    P: Poly<BlockSize = <C as BlockSize>::BlockSize>,
+    P: Poly<BlockSize = C::BlockSize>,
 {
     const BLOCK_SIZE: usize = <C as BlockSize>::BlockSize::USIZE;
-    const MAX_TWEAK_SIZE: usize = Self::BLOCK_SIZE;
 
-    /// Creates an HCTR2 cipher.
+    const MIN_MSG_SIZE: usize = Self::BLOCK_SIZE;
+
+    // (2^(n-1) - 2) / 8
+    const MAX_MSG_SIZE: usize = {
+        assert!(Self::BLOCK_SIZE > 0);
+        let n = Self::BLOCK_SIZE * 8;
+        if n - 1 + 4 >= usize::BITS as usize {
+            usize::MAX
+        } else {
+            let bits = 1 << (n - 1);
+            (bits / 8) as usize
+        }
+    };
+
+    const MAX_TWEAK_SIZE: usize = Self::MAX_MSG_SIZE;
+
+    /// Creates an `Hctr2`.
     pub fn new(cipher: C) -> Self {
         let poly = {
             // h ← Ek(bin(0))
@@ -78,8 +104,15 @@ where
         };
 
         // L ← Ek(bin(1))
-        let mut l = Block::<C>::default();
-        l[0] = 1;
+        #[allow(
+            clippy::indexing_slicing,
+            reason = "The compiler can prove the slice is in bounds."
+        )]
+        let mut l = {
+            let mut l = Block::<C>::default();
+            l[0] = 1;
+            l
+        };
         cipher.encrypt_block_in_place(&mut l);
 
         Hctr2 {
@@ -89,6 +122,7 @@ where
             tweak_len: None,
             state0: P::State::default(),
             state1: P::State::default(),
+            _xctr: PhantomData,
         }
     }
 
@@ -98,7 +132,7 @@ where
     /// if either are less than one block, or if `tweak` is
     /// longer than a block.
     pub fn seal(&mut self, dst: &mut [u8], src: &[u8], tweak: &[u8]) -> Result<(), Error> {
-        self.hctr2(dst, src, tweak, true)
+        self.hctr2::<true>(dst, src, tweak)
     }
 
     /// Decrypts `src` into `dst` using `tweak`.
@@ -107,12 +141,17 @@ where
     /// if either are less than one block, or if `tweak` is
     /// longer than a block.
     pub fn open(&mut self, dst: &mut [u8], src: &[u8], tweak: &[u8]) -> Result<(), Error> {
-        self.hctr2(dst, src, tweak, false)
+        self.hctr2::<false>(dst, src, tweak)
     }
 
-    fn hctr2(&mut self, dst: &mut [u8], src: &[u8], tweak: &[u8], seal: bool) -> Result<(), Error> {
-        if dst.len() < Self::BLOCK_SIZE
-            || src.len() < Self::BLOCK_SIZE
+    fn hctr2<const SEAL: bool>(
+        &mut self,
+        dst: &mut [u8],
+        src: &[u8],
+        tweak: &[u8],
+    ) -> Result<(), Error> {
+        if src.len() < Self::MIN_MSG_SIZE
+            || src.len() > Self::MAX_MSG_SIZE
             || dst.len() < src.len()
             || tweak.len() > Self::MAX_TWEAK_SIZE
         {
@@ -141,7 +180,7 @@ where
 
         // UU ← Ek(MM)
         let mut uu = Block::<C>::default();
-        if seal {
+        if SEAL {
             self.cipher.encrypt_block(&mut uu, &mm);
         } else {
             self.cipher.decrypt_block(&mut uu, &mm);
@@ -151,11 +190,8 @@ where
         let s = xor3::<C>(&mm, &uu, &self.l);
 
         let (u, v) = dst.split_at_mut(Self::BLOCK_SIZE);
-        if cfg!(test) {
-            println!("u={} v={}", u.len(), v.len());
-        }
         // V ← N ⊕ XCTR_k(S)[0;|N|]
-        Xctr::new(&self.cipher).encrypt(v, n, &s);
+        XctrCore::new(&self.cipher, &s).apply_keystream(v, n);
 
         // U ← UU ⊕ Hh(T, V)
         self.poly.reset(&state);
@@ -170,7 +206,7 @@ where
     /// It is an error if `data` is less than one block or if
     /// `tweak` is longer than a block.
     pub fn seal_in_place(&mut self, data: &mut [u8], tweak: &[u8]) -> Result<(), Error> {
-        self.hctr2_in_place(data, tweak, true)
+        self.hctr2_in_place::<true>(data, tweak)
     }
 
     /// Decrypts `data` in-place using `tweak`.
@@ -178,11 +214,18 @@ where
     /// It is an error if `data` is less than one block or if
     /// `tweak` is longer than a block.
     pub fn open_in_place(&mut self, data: &mut [u8], tweak: &[u8]) -> Result<(), Error> {
-        self.hctr2_in_place(data, tweak, false)
+        self.hctr2_in_place::<false>(data, tweak)
     }
 
-    fn hctr2_in_place(&mut self, data: &mut [u8], tweak: &[u8], seal: bool) -> Result<(), Error> {
-        if data.len() < Self::BLOCK_SIZE || tweak.len() > Self::MAX_TWEAK_SIZE {
+    fn hctr2_in_place<const SEAL: bool>(
+        &mut self,
+        data: &mut [u8],
+        tweak: &[u8],
+    ) -> Result<(), Error> {
+        if data.len() < Self::MIN_MSG_SIZE
+            || data.len() > Self::MAX_MSG_SIZE
+            || tweak.len() > Self::MAX_TWEAK_SIZE
+        {
             return Err(Error::InvalidLength);
         }
 
@@ -207,7 +250,7 @@ where
 
         // UU ← Ek(MM)
         let mut uu = Block::<C>::default();
-        if seal {
+        if SEAL {
             self.cipher.encrypt_block(&mut uu, &mm);
         } else {
             self.cipher.decrypt_block(&mut uu, &mm);
@@ -217,7 +260,7 @@ where
         let s = xor3::<C>(&mm, &uu, &self.l);
 
         // V ← N ⊕ XCTR_k(S)[0;|N|]
-        Xctr::new(&self.cipher).encrypt_in_place(n, &s);
+        XctrCore::new(&self.cipher, &s).apply_keystream_in_place(n);
 
         // U ← UU ⊕ Hh(T, V)
         self.poly.reset(&state);
@@ -242,21 +285,21 @@ where
         //    POLYVAL(h, bin(2*|T| + 3) || pad(T))
         //
         // So, write M or pad(M || 1) accordingly.
-        let (head, tail) = GenericArray::chunks_from_slice(m);
-        if cfg!(test) {
-            println!("m={} head={} tail={}", m.len(), head.len(), tail.len());
-        }
+        let (head, tail) = Block::<P>::chunks_from_slice(m);
         if !head.is_empty() {
             self.poly.update(head);
         }
         if !tail.is_empty() {
-            let mut block = Block::<P>::default();
             #[allow(
                 clippy::indexing_slicing,
                 reason = "The compiler can prove the slice is in bounds."
             )]
-            block[..tail.len()].copy_from_slice(tail);
-            block[tail.len()] = 1;
+            let block = {
+                let mut block = Block::<C>::default();
+                block[..tail.len()].copy_from_slice(tail);
+                block[tail.len()] = 1;
+                block
+            };
             self.poly.update(&[block]);
         }
         self.poly.tag()
@@ -288,7 +331,7 @@ where
 impl<C, P> fmt::Debug for Hctr2<C, P>
 where
     C: BlockCipher,
-    P: Poly<BlockSize = <C as BlockSize>::BlockSize>,
+    P: Poly<BlockSize = C::BlockSize>,
 {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("Hctr2").finish_non_exhaustive()
@@ -299,10 +342,7 @@ where
 ///
 /// `odd` is true for |M| % n != 0.
 fn initial_state<S: BlockSize>(tweak: &[u8], odd: bool) -> Block<S> {
-    // TODO: overflows?
-    if tweak.len() > (usize::MAX / 16 - 2) as usize {
-        // TODO
-    }
+    // TODO(eric): What if `t` overflows?
 
     // M = the input to the hash.
     // n = the block size of the hash.
@@ -315,32 +355,4 @@ fn initial_state<S: BlockSize>(tweak: &[u8], odd: bool) -> Block<S> {
     let mut l = Block::<S>::default();
     l[..usize::BITS as usize / 8].copy_from_slice(&t.to_le_bytes());
     l
-}
-
-/// Returns x^y.
-#[inline(always)]
-fn xor2<S: BlockSize>(x: &[u8], y: &Block<S>) -> Block<S> {
-    let mut z = Block::<S>::default();
-    for ((z, x), y) in z.iter_mut().zip(x).zip(y) {
-        *z = x ^ y;
-    }
-    z
-}
-
-/// Returns v^x^y.
-#[inline(always)]
-fn xor3<S: BlockSize>(v: &Block<S>, x: &Block<S>, y: &Block<S>) -> Block<S> {
-    let mut z = Block::<S>::default();
-    for (((z, v), x), y) in z.iter_mut().zip(v).zip(x).zip(y) {
-        *z = v ^ x ^ y;
-    }
-    z
-}
-
-/// Sets z = x^y.
-#[inline(always)]
-pub(crate) fn xor_block_into<S: BlockSize>(z: &mut [u8], x: &[u8], y: &Block<S>) {
-    for ((z, x), y) in z.iter_mut().zip(x).zip(y) {
-        *z = x ^ y;
-    }
 }

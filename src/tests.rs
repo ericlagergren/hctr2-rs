@@ -6,7 +6,7 @@ use serde::Deserialize;
 use crate::{
     aes::{Aes128, Aes192, Aes256},
     block::Block,
-    xctr::Xctr,
+    xctr::{Xctr, XctrCore},
     Hctr2Aes128, Hctr2Aes192, Hctr2Aes256,
 };
 
@@ -74,9 +74,15 @@ macro_rules! xctr2_test {
                 let plaintext = &v.plaintext_hex;
                 let ciphertext = &v.ciphertext_hex;
 
-                let mut got = vec![0u8; plaintext.len()];
-                Xctr::new(&cipher).encrypt(&mut got, plaintext, &nonce);
-                assert_eq!(&got, ciphertext, "#{i}: `xctr`");
+                println!("=====");
+                let mut got = vec![42u8; plaintext.len()];
+                XctrCore::new(&cipher, &nonce).apply_keystream(&mut got, plaintext);
+                assert_eq!(&got, ciphertext, "#{i}: `crypt`");
+                println!();
+
+                XctrCore::new(&cipher, &nonce).apply_keystream_in_place(&mut got);
+                assert_eq!(&got, plaintext, "#{i}: `crypt_in_place`");
+                println!();
             }
         }
     };
@@ -99,17 +105,11 @@ macro_rules! hctr2_test {
                 let plaintext = &v.plaintext_hex;
                 let ciphertext = &v.ciphertext_hex;
 
-                let mut got = &mut vec![0u8; plaintext.len()];
+                let mut got = &mut vec![42u8; plaintext.len()];
 
-                println!();
                 c.seal(&mut got, &plaintext, &tweak)
                     .expect("should not fail");
-                assert_eq!(
-                    got,
-                    ciphertext,
-                    "#{i}: `seal` {}",
-                    ciphertext.as_slice().encode_hex::<String>()
-                );
+                assert_eq!(got, ciphertext, "#{i}: `seal`");
 
                 c.open(&mut got, &ciphertext, &tweak)
                     .expect("should not fail");

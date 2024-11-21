@@ -71,6 +71,32 @@ impl<const K: usize, const N: usize> Aes<K, N> {
 
         ByRef(&self.dec)
     }
+
+    /// # Safety
+    ///
+    /// The NEON and AES architectural features must be
+    /// enabled.
+    #[inline]
+    #[target_feature(enable = "neon,aes")]
+    pub unsafe fn xctr_crypt(&self, dst: &mut [u8], src: &[u8], nonce: &Block<U16>) {
+        const { check_sizes::<K, N>() }
+        debug_assert!(supported());
+
+        xctr_asm(&self.enc.keys, dst, src, nonce)
+    }
+
+    /// # Safety
+    ///
+    /// The NEON and AES architectural features must be
+    /// enabled.
+    #[inline]
+    #[target_feature(enable = "neon,aes")]
+    pub unsafe fn xctr_crypt_in_place(&self, data: &mut [u8], nonce: &Block<U16>) {
+        const { check_sizes::<K, N>() }
+        debug_assert!(supported());
+
+        xctr_in_place_asm(&self.enc.keys, data, nonce)
+    }
 }
 
 /// - `K`: key size in bytes.
@@ -136,7 +162,6 @@ impl<const K: usize, const N: usize> AesEnc<K, N> {
             let (hi, lo) = src.split_at(src.len() / 2);
             let uint8x16x4_t(p0, p1, p2, p3) = vld1q_u8_x4(lo.as_ptr().cast());
             let uint8x16x4_t(p4, p5, p6, p7) = vld1q_u8_x4(hi.as_ptr().cast());
-
             let mut blocks = [p0, p1, p2, p3, p4, p5, p6, p7];
 
             let (head, tail) = self.keys.split_at(self.keys.len() - 2);
@@ -252,19 +277,6 @@ impl<const K: usize, const N: usize> AesEnc<K, N> {
         block = vaeseq_u8(block, tail[0]);
         block = veorq_u8(block, tail[1]);
         vst1q_u8(data.as_mut_ptr(), block)
-    }
-
-    /// # Safety
-    ///
-    /// The NEON and AES architectural features must be
-    /// enabled.
-    #[inline]
-    #[target_feature(enable = "neon,aes")]
-    unsafe fn xctr(&self, dst: &mut [u8], src: &[u8], nonce: &Block<Self>) {
-        const { check_sizes::<K, N>() }
-        debug_assert!(supported());
-
-        xctr_asm(&self.keys, dst, src, nonce)
     }
 }
 
@@ -582,7 +594,7 @@ unsafe fn xctr_asm<const N: usize>(
     let mut src = src.chunks_exact(BLOCK_SIZE * STRIDE);
     let mut vctr: [uint8x16_t; STRIDE] = array::from_fn(|_| vdupq_n_u8(0));
     for (dst, src) in dst.by_ref().zip(src.by_ref()) {
-        let (hi, lo) = src.split_at(src.len() / 2);
+        let (lo, hi) = src.split_at(src.len() / 2);
         let uint8x16x4_t(p0, p1, p2, p3) = vld1q_u8_x4(lo.as_ptr());
         let uint8x16x4_t(p4, p5, p6, p7) = vld1q_u8_x4(hi.as_ptr());
         let p = [p0, p1, p2, p3, p4, p5, p6, p7];
@@ -639,6 +651,89 @@ unsafe fn xctr_asm<const N: usize>(
 
         idx += 1;
     }
+
+    // TODO: non-full blocks.
+}
+
+/// # Safety
+///
+/// The NEON and AES architectural features must be enabled.
+#[inline]
+#[target_feature(enable = "neon,aes")]
+unsafe fn xctr_in_place_asm<const N: usize>(
+    rk: &[uint8x16_t; N],
+    data: &mut [u8],
+    nonce: &Block<U16>,
+) {
+    const { assert!(N == 11 || N == 13 || N == 15) }
+
+    debug_assert!(supported());
+
+    let mut idx = 1u64;
+    let nonce = vld1q_u8(nonce.as_ptr());
+
+    // Handle 8 blocks at a time.
+    const STRIDE: usize = 8;
+    let mut data = data.chunks_exact_mut(BLOCK_SIZE * STRIDE);
+    let mut vctr: [uint8x16_t; STRIDE] = array::from_fn(|_| vdupq_n_u8(0));
+    for chunk in data.by_ref() {
+        let (lo, hi) = chunk.split_at_mut(chunk.len() / 2);
+        let uint8x16x4_t(p0, p1, p2, p3) = vld1q_u8_x4(lo.as_ptr());
+        let uint8x16x4_t(p4, p5, p6, p7) = vld1q_u8_x4(hi.as_ptr());
+        let p = [p0, p1, p2, p3, p4, p5, p6, p7];
+
+        for (i, ctr) in vctr.iter_mut().enumerate() {
+            let tmp = vsetq_lane_u64(idx + i as u64, vdupq_n_u64(0), 0);
+            *ctr = veorq_u8(vreinterpretq_u8_u64(tmp), nonce);
+        }
+
+        let (head, tail) = rk.split_at(rk.len() - 2);
+        for &rk in head {
+            for ctr in &mut vctr {
+                *ctr = vaeseq_u8(*ctr, rk);
+                *ctr = vaesmcq_u8(*ctr);
+            }
+        }
+        for (ctr, src) in vctr.iter_mut().zip(p) {
+            *ctr = vaeseq_u8(*ctr, tail[0]);
+            *ctr = veorq_u8(*ctr, tail[1]);
+            *ctr = veorq_u8(*ctr, src);
+        }
+
+        vst1q_u8_x4(
+            lo.as_mut_ptr().cast(),
+            uint8x16x4_t(vctr[0], vctr[1], vctr[2], vctr[3]),
+        );
+        vst1q_u8_x4(
+            hi.as_mut_ptr().cast(),
+            uint8x16x4_t(vctr[4], vctr[5], vctr[6], vctr[7]),
+        );
+
+        idx += 8;
+    }
+
+    // Handle single blocks.
+    let data = data.into_remainder().chunks_exact_mut(BLOCK_SIZE);
+    for block in data {
+        let mut ctr = {
+            let tmp = vsetq_lane_u64(idx as u64, vdupq_n_u64(0), 0);
+            veorq_u8(vreinterpretq_u8_u64(tmp), nonce)
+        };
+        let (head, tail) = rk.split_at(rk.len() - 2);
+        for &rk in head {
+            ctr = vaeseq_u8(ctr, rk);
+            ctr = vaesmcq_u8(ctr);
+        }
+        ctr = vaeseq_u8(ctr, tail[0]);
+        ctr = veorq_u8(ctr, tail[1]);
+
+        let src = vld1q_u8(block.as_ptr());
+        vst1q_u8(block.as_mut_ptr(), veorq_u8(ctr, src));
+
+        idx += 1;
+    }
+
+    // TODO: non-full blocks.
 }
 
 /// # Safety

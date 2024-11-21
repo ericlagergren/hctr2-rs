@@ -13,7 +13,10 @@ use core::{fmt, mem::ManuallyDrop};
 use polyhash::Polyval;
 use typenum::U16;
 
-use crate::block::{BlockCipher, BlockClosure, BlockSize};
+use crate::{
+    block::{Block, BlockCipher, BlockClosure, BlockSize},
+    xctr::{self, Xctr},
+};
 
 cfg_if::cfg_if! {
     if #[cfg(feature = "soft")] {
@@ -106,29 +109,13 @@ macro_rules! impl_hctr {
 
 impl_hctr! {
     /// HCTR2 with AES-128.
-    Hctr2Aes128, Aes128, 16,
-}
-
-impl_hctr! {
-    /// HCTR2 with AES-192.
-    ///
-    /// # Warning
-    ///
-    /// Except for compatibility purposes, there isn't any reason
-    /// to use `Hctr2Aes192`. Use [`Hctr2Aes128`] or
-    /// [`Hctr2Aes256`] instead.
-    Hctr2Aes192, Aes192, 24,
-}
-
-impl_hctr! {
-    /// HCTR2 with AES-256.
     ///
     /// # Examples
     ///
     /// ```rust
-    /// use hctr2::{Hctr2Aes256, hazmat::Hctr2};
+    /// use hctr2::Hctr2Aes128;
     ///
-    /// let hctr = Hctr2Aes256::new(&[
+    /// let mut hctr = Hctr2Aes128::new(&[
     ///     0x74, 0xf9, 0x8f, 0x60, 0x78, 0x6a, 0xbf, 0xa8,
     ///     0x5b, 0x0b, 0xbb, 0xa0, 0x59, 0xe0, 0xf9, 0x1e,
     /// ]);
@@ -143,6 +130,22 @@ impl_hctr! {
     /// ];
     /// assert_eq!(data, want);
     /// ```
+    Hctr2Aes128, Aes128, 16,
+}
+
+impl_hctr! {
+    /// HCTR2 with AES-192.
+    ///
+    /// # ⚠️ Warning
+    ///
+    /// Except for compatibility purposes, there isn't any reason
+    /// to use `Hctr2Aes192`. Use [`Hctr2Aes128`] or
+    /// [`Hctr2Aes256`] instead.
+    Hctr2Aes192, Aes192, 24,
+}
+
+impl_hctr! {
+    /// HCTR2 with AES-256.
     Hctr2Aes256, Aes256, 32,
 }
 
@@ -157,7 +160,7 @@ macro_rules! impl_aes {
 
         impl $name {
             /// Creates a new AES cipher.
-            pub(crate) fn new(key: &[u8; $key_size]) -> Self {
+            pub fn new(key: &[u8; $key_size]) -> Self {
                 let aes = if imp::supported() {
                     // SAFETY: `supported` is true, so we can
                     // call this method.
@@ -224,6 +227,28 @@ macro_rules! impl_aes {
                 Self(aes)
             }
         }
+
+        // impl Xctr for $name {
+        //     fn crypt(&self, dst: &mut [u8], src: &[u8], nonce: &Block<Self>) {
+        //         if imp::supported() {
+        //             // SAFETY: `supported` is true, so `asm` is
+        //             // initialized.
+        //             unsafe { self.0.asm.xctr_crypt(dst, src, nonce) }
+        //         } else {
+        //             xctr::crypt(self, dst, src, nonce)
+        //         }
+        //     }
+
+        //     fn crypt_in_place(&self, data: &mut [u8], nonce: &Block<Self>) {
+        //         if imp::supported() {
+        //             // SAFETY: `supported` is true, so `asm` is
+        //             // initialized.
+        //             unsafe { self.0.asm.xctr_crypt_in_place(data, nonce) }
+        //         } else {
+        //             xctr::crypt_in_place(self, data, nonce)
+        //         }
+        //     }
+        // }
 
         impl fmt::Debug for $name {
             fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {

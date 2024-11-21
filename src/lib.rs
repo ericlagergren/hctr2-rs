@@ -12,9 +12,9 @@
 //! # Examples
 //!
 //! ```rust
-//! use hctr2::{Hctr2Aes256, hazmat::Hctr2};
+//! use hctr2::Hctr2Aes128;
 //!
-//! let hctr = Hctr2Aes256::new(&[
+//! let mut hctr = Hctr2Aes128::new(&[
 //!     0x74, 0xf9, 0x8f, 0x60, 0x78, 0x6a, 0xbf, 0xa8,
 //!     0x5b, 0x0b, 0xbb, 0xa0, 0x59, 0xe0, 0xf9, 0x1e,
 //! ]);
@@ -33,7 +33,7 @@
 //! # Features
 //!
 //! - `aes`: Enable the standard HCTR2 instantiations with
-//!   AES-128, AES-192, and AES-256 (default).
+//!   AES-128, AES-192, and AES-256 (enabled by default).
 //! - `hazmat`: Enable cryptographically dangerous features.
 //! - `polyval`: Enable POLYVAL support. (Enabled by `aes`.)
 //! - `soft`: Force software implementations where possible.
@@ -75,9 +75,9 @@ pub mod hazmat;
 mod hctr;
 mod poly;
 mod tests;
+mod util;
 mod xctr;
 
 pub use aes::{Hctr2Aes128, Hctr2Aes192, Hctr2Aes256};
-pub use xctr::Foo;
 
-pub use crate::{block::BlockCipher, hctr::Error};
+pub use crate::hctr::Error;

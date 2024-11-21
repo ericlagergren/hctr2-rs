@@ -348,21 +348,16 @@ fn xctr_asm<const N: usize>(rk: &[Block; N], dst: &mut [u8], src: &[u8], nonce: 
     }
 }
 
+#[inline(always)]
 fn add_round_key(block: &mut Block, rk: &Block) {
-    for (b, k) in block.iter_mut().zip(rk) {
-        *b ^= k;
-    }
+    xor_in_place(block, rk)
 }
 
+/// Sets `x ^= y`.
+#[inline(always)]
 fn xor_in_place(x: &mut Block, y: &Block) {
     for (x, y) in x.iter_mut().zip(y) {
         *x ^= y;
-    }
-}
-
-fn xor3_in_place(z: &mut Block, x: &Block, y: &Block) {
-    for ((z, x), y) in z.iter_mut().zip(x).zip(y) {
-        *z = x ^ y;
     }
 }
 
